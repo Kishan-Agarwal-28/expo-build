@@ -34,10 +34,10 @@ var (
 	AWSAccessKey string
 	AWSSecretKey string
 	AWSRegion    string
+	BASE_URL string
 )
 var app_id string
 var qrlink string
-var BASE_URL string
 func main() {
 	dir, err := os.Getwd()
 	if err != nil {
