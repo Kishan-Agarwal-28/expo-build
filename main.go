@@ -37,7 +37,7 @@ var (
 )
 var app_id string
 var qrlink string
-
+var BASE_URL string
 func main() {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -185,7 +185,7 @@ func uploadAPKToS3(filePath string, bucketName string) error {
 
 	fmt.Println("\nSuccessfully uploaded to S3!")
 
-	qrlink = fmt.Sprintf("http://expo-build-testifywebdev.workers.dev?q=%s", objectKey)
+	qrlink = fmt.Sprintf("%s?q=%s",BASE_URL, objectKey)
 	return nil
 }
 func createTempScript() (string, error) {

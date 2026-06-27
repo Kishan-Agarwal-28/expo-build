@@ -79,7 +79,8 @@ go build -ldflags "\
   -X main.AWSEndpoint=https://your-endpoint \
   -X main.AWSAccessKey=your-access-key \
   -X main.AWSSecretKey=your-secret-key \
-  -X main.AWSRegion=your-region" \
+  -X main.AWSRegion=your-region \
+  -X BASE_URL=https://your-bucket.s3.your-region.amazonaws.com" \
   -o expo-build.exe .
 ```
 
@@ -163,8 +164,6 @@ Used purely as an S3 key prefix to namespace uploads — one project's builds wo
 ## Known limitations / roadmap
 
 - **S3 upload is currently mandatory on Windows.** If AWS credentials weren't injected at compile time, the binary panics *after* a successful build rather than just leaving the APK in place — there's no "build-only, skip upload" path on Windows yet.
-- **Worker URL is hardcoded** to `expo-build-testifywebdev.workers.dev` in `main.go` rather than being configurable via `-ldflags` like the rest of the AWS config.
-- **Download links are generated as `http://`**, not `https://`.
 - **Only `assembleDebug` is wired up** — no release/signed build variant yet.
 - **Android SDK provisioning versions are hardcoded** (`android-36`, `build-tools;36.0.0`, `ndk;27.1.12297006`) rather than configurable per project.
 - **No WSL distro selection** — assumes the default WSL distro.
