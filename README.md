@@ -80,7 +80,7 @@ go build -ldflags "\
   -X main.AWSAccessKey=your-access-key \
   -X main.AWSSecretKey=your-secret-key \
   -X main.AWSRegion=your-region \
-  -X BASE_URL=https://your-bucket.s3.your-region.amazonaws.com" \
+  -X main.BASE_URL=https://your-bucket.s3.your-region.amazonaws.com" \
   -o expo-build.exe .
 ```
 
