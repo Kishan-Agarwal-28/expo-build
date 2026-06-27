@@ -1,0 +1,22 @@
+{
+  "name": "expo-build",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.4",
+    "@types/node": "^26.0.1",
+    "typescript": "^7.0.1-rc",
+    "vitest": "~3.2.0",
+    "wrangler": "^4.105.0"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20"
+  }
+}
