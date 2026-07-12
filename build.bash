@@ -16,42 +16,9 @@ elif [[ -z "$JAVA_HOME" ]]; then
 fi
 
 # ==============================================================================
-# 2. Android SDK Auto-Setup (WSL needs a Linux SDK, not the Windows one)
+# 2. Setup Build Directory & Copy Files
 # ==============================================================================
-export ANDROID_HOME="$HOME/Android/Sdk"
-export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools"
-
-if [[ ! -d "$ANDROID_HOME" ]]; then
-  echo "Android SDK not found in WSL. Downloading and configuring (this will take a few minutes)..."
-  
-  # Ensure 'unzip' is installed (required to unpack the SDK tools)
-  if ! command -v unzip >/dev/null 2>&1; then
-    echo "ERROR: 'unzip' is required but not installed."
-    echo "Please open a normal WSL terminal and run: sudo apt update && sudo apt install unzip -y"
-    exit 1
-  fi
-
-  mkdir -p "$ANDROID_HOME/cmdline-tools"
-  # Download official Android Command Line Tools for Linux
-  wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O /tmp/cmdline-tools.zip
-  unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
-  rm /tmp/cmdline-tools.zip
-  
-  # Rename extracted folder to 'latest' (required by modern Android SDK setups)
-  mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-  
-  echo "Accepting Android SDK licenses..."
-  yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-  
-  echo "Installing required platforms, build tools, and NDK (Please wait)..."
-  "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" > /dev/null
-  echo "Android SDK setup complete!"
-fi
-# ==============================================================================
-
 BUILD_DIR=~/build
-
-echo "Copying files"
 
 if [[ -n "$1" ]]; then
   initialPath="$1"
@@ -60,26 +27,30 @@ else
   exit 1
 fi
 
+BUILD_TYPE="$2"
+if [[ "$BUILD_TYPE" == "Production" ]]; then
+  GRADLE_CMD="assembleRelease"
+  APK_NAME="app-release.apk"
+  OUTPUT_SUBDIR="release"
+elif [[ "$BUILD_TYPE" == "Signing Report" ]]; then
+  GRADLE_CMD="signingReport"
+  APK_NAME=""
+else
+  GRADLE_CMD="assembleDebug"
+  APK_NAME="app-debug.apk"
+  OUTPUT_SUBDIR="debug"
+fi
+
 detect_package_manager() {
   local path="$1"
-  if [[ -f "$path/pnpm-lock.yaml" ]]; then
-    echo "pnpm"
-  elif [[ -f "$path/yarn.lock" ]]; then
-    echo "yarn"
-  elif [[ -f "$path/package-lock.json" ]]; then
-    echo "npm"
-  elif [[ -f "$path/bun.lock" ]]; then
-    echo "bun"
-  else
-    echo "npm" 
-  fi
+  if [[ -f "$path/pnpm-lock.yaml" ]]; then echo "pnpm"
+  elif [[ -f "$path/yarn.lock" ]]; then echo "yarn"
+  elif [[ -f "$path/package-lock.json" ]]; then echo "npm"
+  elif [[ -f "$path/bun.lock" ]]; then echo "bun"
+  else echo "npm"; fi
 }
 
 pkgManager=$(detect_package_manager "$initialPath")
-
-if [[ ! -f "$initialPath/pnpm-lock.yaml" && ! -f "$initialPath/yarn.lock" && ! -f "$initialPath/package-lock.json" && ! -f "$initialPath/bun.lock" ]]; then
-  echo "Warning: no lockfile found in $initialPath. Defaulting to npm."
-fi
 echo "Detected package manager: $pkgManager"
 
 case "$pkgManager" in
@@ -90,65 +61,128 @@ case "$pkgManager" in
 esac
 
 mkdir -p "$BUILD_DIR"
-
-# Using tar pipe instead of rsync to exclude unnecessary heavy directories
+echo "Copying files..."
 tar --exclude='node_modules' --exclude='android/.cxx' --exclude='android/build' -cf - -C "$initialPath" . | tar -xf - -C "$BUILD_DIR"
-
 cd "$BUILD_DIR"
 
-echo "Starting the build"
-echo "Installing dependencies with $pkgManager"
+# ==============================================================================
+# 3. Install Dependencies & Prebuild (Must happen BEFORE SDK Setup)
+# ==============================================================================
+echo "Installing dependencies with $pkgManager..."
 if ! $installCmd; then
   echo "Dependency installation failed."
   exit 1
 fi
-echo "Dependencies installed successfully"
 
-echo "Running expo prebuild"
+echo "Running expo prebuild..."
 if ! npx expo prebuild; then
   echo "Expo prebuild failed."
   exit 1
 fi
 echo "Prebuild completed successfully"
+
 # ==============================================================================
-# NEW: Inject Gradle limits to prevent Out-Of-Memory (OOM) crashes in WSL
+# 4. Auto-Detect Required Android SDK Versions
 # ==============================================================================
-echo "Configuring Gradle memory limits..."
+echo "Auto-detecting required Android SDK versions from build.gradle..."
+
+if [[ -f "android/build.gradle" ]]; then
+  COMPILE_SDK=$(grep -oE 'compileSdk(Version)?\s*=?\s*[0-9]+' android/build.gradle | grep -oE '[0-9]+' | head -1)
+  BUILD_TOOLS=$(grep -oE 'buildToolsVersion\s*=?\s*["'\''][0-9.]+["'\'']' android/build.gradle | grep -oE '[0-9.]+' | head -1)
+  NDK_VERSION=$(grep -oE 'ndkVersion\s*=?\s*["'\''][0-9.]+["'\'']' android/build.gradle | grep -oE '[0-9.]+' | head -1)
+fi
+
+COMPILE_SDK=${COMPILE_SDK:-35}
+BUILD_TOOLS=${BUILD_TOOLS:-35.0.0}
+NDK_VERSION=${NDK_VERSION:-26.1.10909125}
+
+echo "Detected Requirements:"
+echo " -> Compile SDK:   $COMPILE_SDK"
+echo " -> Build Tools:   $BUILD_TOOLS"
+echo " -> NDK Version:   $NDK_VERSION"
+
+# ==============================================================================
+# 5. Provision Android SDK
+# ==============================================================================
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools"
+
+if [[ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]]; then
+  echo "Android SDK not found in WSL. Downloading..."
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "ERROR: 'unzip' is required. Run: sudo apt install unzip -y"
+    exit 1
+  fi
+
+  mkdir -p "$ANDROID_HOME/cmdline-tools"
+  wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O /tmp/cmdline-tools.zip
+  unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+  rm /tmp/cmdline-tools.zip
+  mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+fi
+
+echo "Accepting Android SDK licenses..."
+yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+
+echo "Installing platforms;android-$COMPILE_SDK, build-tools;$BUILD_TOOLS, and ndk;$NDK_VERSION..."
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+  "platform-tools" \
+  "platforms;android-$COMPILE_SDK" \
+  "build-tools;$BUILD_TOOLS" \
+  "ndk;$NDK_VERSION" > /dev/null
+echo "Android SDK setup complete!"
+
+# ==============================================================================
+# 6. Configure Gradle (Memory limits & SDK Location)
+# ==============================================================================
+echo "Configuring Gradle memory limits and local.properties..."
 cd ./android
+
+echo "" >> gradle.properties
+
 cat <<EOF >> gradle.properties
 # Restrict Gradle JVM memory usage
 org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
-# Restrict parallel workers to prevent CMake from eating all RAM
 org.gradle.workers.max=2
-# Enable caching and parallel builds (safely)
 org.gradle.caching=true
 org.gradle.parallel=true
+
+# ONLY build C++ for physical devices to save 50% memory and time!
+reactNativeArchitectures=armeabi-v7a,arm64-v8a
 EOF
+
+echo "sdk.dir=$ANDROID_HOME" > local.properties
+
 # ==============================================================================
+# 7. Build the APK / Run target
+# ==============================================================================
+echo "Starting Gradle execution: $GRADLE_CMD..."
 
-echo "Starting Gradle build"
-if ! ./gradlew assembleDebug; then
-  echo "Gradle build failed."
-  exit 1
-fi
-echo "Gradle build completed successfully"
+export NODE_OPTIONS="--max-old-space-size=8192"
+export CMAKE_BUILD_PARALLEL_LEVEL=2
+export NINJA_JOBS=2
 
-
-outputDir="$BUILD_DIR/android/app/build/outputs/apk/debug"
-
-if [[ ! -d "$outputDir" ]]; then
-  echo "Output directory not found: $outputDir"
+if ! ./gradlew $GRADLE_CMD --info; then
+  echo "Gradle execution failed."
   exit 1
 fi
 
-echo "Build complete. APK is ready at $outputDir"
+echo "Gradle $GRADLE_CMD completed successfully"
 
-# Copy the APK to the current directory
-cp "$outputDir/app-debug.apk" "$initialPath/app-debug.apk"
+if [[ -n "$APK_NAME" ]]; then
+  outputDir="$BUILD_DIR/android/app/build/outputs/apk/$OUTPUT_SUBDIR"
 
-echo "Build complete. APK is ready at $initialPath/app-debug.apk"
+  if [[ ! -d "$outputDir" ]]; then
+    echo "Output directory not found: $outputDir"
+    exit 1
+  fi
+
+  cp "$outputDir/$APK_NAME" "$initialPath/$APK_NAME"
+  echo "Build complete. APK is ready at $initialPath/$APK_NAME"
+fi
 
 echo "Cleaning up..."
+cd "$initialPath"
 rm -rf "$BUILD_DIR"
 
 exit 0

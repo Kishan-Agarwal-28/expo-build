@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -34,10 +35,11 @@ var (
 	AWSAccessKey string
 	AWSSecretKey string
 	AWSRegion    string
-	BASE_URL string
+	BASE_URL     string
 )
 var app_id string
 var qrlink string
+
 func main() {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -45,6 +47,35 @@ func main() {
 		panic(err)
 	}
 	app_id = checkAppID(dir)
+
+	// --- INTERACTIVE PROMPTS ---
+	var action string
+	prompt := &survey.Select{
+		Message: "What would you like to do?",
+		Options: []string{"Build a new APK", "Upload an existing APK"},
+	}
+	survey.AskOne(prompt, &action)
+
+	if action == "Upload an existing APK" {
+		var apkPath string
+		pathPrompt := &survey.Input{
+			Message: "Path to the existing APK:",
+			Default: filepath.Join(dir, "app-debug.apk"),
+		}
+		survey.AskOne(pathPrompt, &apkPath)
+
+		handleUploadAndExit(apkPath)
+		return
+	}
+
+	var buildType string
+	typePrompt := &survey.Select{
+		Message: "Select the build type:",
+		Options: []string{"Debug", "Production", "Signing Report"},
+	}
+	survey.AskOne(typePrompt, &buildType)
+	// ---------------------------
+
 	scriptPath, err := createTempScript()
 	if err != nil {
 		fmt.Println("Error extracting embedded script:", err)
@@ -53,45 +84,59 @@ func main() {
 	defer os.Remove(scriptPath)
 
 	if runtime.GOOS != "windows" {
-		if err := runBuildDirect(scriptPath, dir); err != nil {
+		if err := runBuildDirect(scriptPath, dir, buildType); err != nil {
 			panic(err)
 		}
-		fmt.Println("Build finished successfully.")
-		return
-	}
-
-	fmt.Println("Windows detected... checking if WSL is installed")
-	if checkWSL() {
-		fmt.Println("WSL is installed")
 	} else {
-		fmt.Println("WSL is not installed")
-		fmt.Println("Installing WSL (this requires admin rights)...")
-		if !installWSL() {
-			panic("Error installing WSL")
+		fmt.Println("Windows detected... checking if WSL is installed")
+		if !checkWSL() {
+			fmt.Println("WSL is not installed")
+			fmt.Println("Installing WSL (this requires admin rights)...")
+			if !installWSL() {
+				panic("Error installing WSL")
+			}
+			fmt.Println("WSL installed. A reboot is usually required. Please reboot and re-run.")
+			return
 		}
-		fmt.Println("WSL installed. A reboot is usually required. Please reboot and re-run.")
+		if err := runBuildInWSL(scriptPath, dir, buildType); err != nil {
+			panic(err)
+		}
+	}
+
+	fmt.Println("Build phase finished.")
+
+	if buildType == "Signing Report" {
+		fmt.Println("Signing report generated successfully. No APK to upload.")
 		return
 	}
 
-	if err := runBuildInWSL(scriptPath, dir); err != nil {
-		panic(err)
-	}
-	fmt.Println("Build finished successfully.")
-	if S3BucketName == "" {
-		panic("S3BucketName was not injected during the build process!")
+	var apkName string
+	if buildType == "Production" {
+		apkName = "app-release.apk"
+	} else {
+		apkName = "app-debug.apk"
 	}
 
-	apkPath := filepath.Join(dir, "app-debug.apk")
+	apkPath := filepath.Join(dir, apkName)
+	handleUploadAndExit(apkPath)
+}
+
+func handleUploadAndExit(apkPath string) {
+	if S3BucketName == "" {
+		fmt.Println("Warning: S3BucketName was not injected during the build process!")
+	}
 
 	if err := uploadAPKToS3(apkPath, S3BucketName); err != nil {
 		fmt.Println("Error uploading to S3:", err)
+		return
 	}
 	if qrlink == "" {
 		panic("Error generating download link")
 	}
-	fmt.Printf("APK uploaded successfully download the app using the following link %s \n OR \n Scan the qrcode below \n\n", qrlink)
+	fmt.Printf("APK uploaded successfully. Download the app using the following link %s \n OR \n Scan the qrcode below \n\n", qrlink)
 	qrterminal.GenerateHalfBlock(qrlink, qrterminal.M, os.Stdout)
 }
+
 func checkAppID(dir string) string {
 	tomlPath := filepath.Join(dir, "expo-build.toml")
 
@@ -123,6 +168,7 @@ func checkAppID(dir string) string {
 	os.WriteFile(tomlPath, []byte("[app]\napp_id = \""+id+"\"\n"), 0644)
 	return id
 }
+
 func uploadAPKToS3(filePath string, bucketName string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -185,9 +231,10 @@ func uploadAPKToS3(filePath string, bucketName string) error {
 
 	fmt.Println("\nSuccessfully uploaded to S3!")
 
-	qrlink = fmt.Sprintf("%s?q=%s",BASE_URL, objectKey)
+	qrlink = fmt.Sprintf("%s?q=%s", BASE_URL, objectKey)
 	return nil
 }
+
 func createTempScript() (string, error) {
 	tmpFile, err := os.CreateTemp("", "build-*.bash")
 	if err != nil {
@@ -230,7 +277,7 @@ func toWSLPath(winPath string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func runBuildInWSL(scriptPath, projectDir string) error {
+func runBuildInWSL(scriptPath, projectDir, buildType string) error {
 	wslScriptPath, err := toWSLPath(scriptPath)
 	if err != nil {
 		return fmt.Errorf("translating script path: %w", err)
@@ -240,7 +287,7 @@ func runBuildInWSL(scriptPath, projectDir string) error {
 		return fmt.Errorf("translating project path: %w", err)
 	}
 
-	shellCmd := fmt.Sprintf("bash %s %s", shellQuote(wslScriptPath), shellQuote(wslProjectPath))
+	shellCmd := fmt.Sprintf("bash %s %s %s", shellQuote(wslScriptPath), shellQuote(wslProjectPath), shellQuote(buildType))
 
 	cmd := exec.Command("wsl.exe", "bash", "-lic", shellCmd)
 	cmd.Stdout = os.Stdout
@@ -249,8 +296,8 @@ func runBuildInWSL(scriptPath, projectDir string) error {
 	return cmd.Run()
 }
 
-func runBuildDirect(scriptPath, projectDir string) error {
-	cmd := exec.Command("bash", scriptPath, projectDir)
+func runBuildDirect(scriptPath, projectDir, buildType string) error {
+	cmd := exec.Command("bash", scriptPath, projectDir, buildType)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
