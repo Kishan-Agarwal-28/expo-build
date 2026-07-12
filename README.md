@@ -71,7 +71,7 @@ flowchart TD
 Build from source, injecting your S3/AWS config at compile time:
 
 ```bash
-git clone <your-repo-url>
+git clone 
 cd expo-build
 
 go build -ldflags "\
