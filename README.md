@@ -12,7 +12,7 @@ The actual fix isn't a registry tweak or a shorter project folder name — it's 
 
 `expo-build` is a small Go CLI with three parts:
 
-1. **`main.go`** — the CLI entrypoint. Detects the OS, manages WSL (checking for it, installing it if missing), translates Windows paths to WSL paths, orchestrates the build, uploads the resulting APK to S3-compatible storage, and prints a QR code + download link.
+1. **`main.go`** — the CLI entrypoint. Detects the OS, manages WSL (checking for it, installing it if missing), translates Windows paths to WSL paths, orchestrates the build, and optionally uploads the resulting APK/AAB to S3-compatible storage with a QR code download link.
 2. **`build.bash`** — the actual build logic, embedded into the Go binary at compile time via `//go:embed`. This is the single source of truth for what "building the app" means, and it's what actually runs (inside WSL on Windows, or directly on macOS/Linux).
 3. **Cloudflare Worker** — a thin authenticated proxy that sits in front of a private S3 bucket, so the QR code / download link handed to a phone never needs to expose raw AWS credentials or require a public bucket.
 
@@ -20,55 +20,66 @@ The actual fix isn't a registry tweak or a shorter project folder name — it's 
 - Detects whether WSL is installed; if not, installs it (requires admin rights and a reboot, after which you re-run the tool).
 - Translates the script path and project path from Windows paths to WSL paths via `wslpath`.
 - Runs `build.bash` inside WSL — this is the key trick. The script `tar`-pipes the project into `~/build`, *inside WSL's native ext4 filesystem*, where there is no practical path length limit. The entire install → prebuild → Gradle build pipeline then runs there instead of on the mounted Windows drive.
-- Copies the finished APK back out to the original Windows project directory.
-- Uploads the APK to S3 and prints a shareable link + terminal QR code (see [Known limitations](#known-limitations--roadmap) — this step is currently required on Windows, not optional).
+- Copies the finished artifact back out to the original Windows project directory.
+- For APKs, you choose how to deliver to a device: over local WiFi (no internet needed) or via an S3 upload with a shareable QR link.
 
 ### On macOS / Linux
 - Skips WSL entirely and just runs `build.bash` directly against the native filesystem, since the path-length problem doesn't exist there.
-- Finishes once the APK is in the project directory — no S3 upload on this path.
+- Finishes once the artifact is in the project directory.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A[expo-build.exe] --> B{OS?}
+    A[expo-build] --> B{OS?}
     B -->|Windows| C{WSL installed?}
     C -->|No| D[Install WSL<br/>reboot required, re-run after]
     C -->|Yes| E[Translate paths<br/>Windows → WSL via wslpath]
     E --> F[Run build.bash inside WSL]
     B -->|macOS / Linux| G[Run build.bash directly]
-    F --> H[APK copied back to project dir]
+    F --> H[Artifact copied back to project dir]
     G --> H
-    H --> I{Windows path?}
-    I -->|Yes| J[Upload APK to S3<br/>multipart, 5MB parts, 5 concurrent]
-    J --> K[Cloudflare Worker<br/>signs request, proxies S3 GET]
-    K --> L[QR code + download link<br/>printed to terminal]
-    I -->|No| M[Done — APK left in project dir]
+    H --> I{Build type?}
+    I -->|Signing Report| Z[Done — report printed to terminal]
+    I -->|AAB| Y[Done — AAB saved locally for Play Store]
+    I -->|APK| J{Delivery method?}
+    J -->|Local WiFi| K[Serve APK over HTTP on LAN<br/>progress bar, auto-shutdown after download]
+    J -->|S3 upload| L[Upload APK to S3<br/>multipart, 5MB parts, 5 concurrent]
+    L --> M[Cloudflare Worker<br/>signs request, proxies S3 GET]
+    M --> N[QR code + download link<br/>printed to terminal]
+    K --> O[QR code + local URL<br/>printed to terminal]
 ```
 
 ## Features
 
 - Cross-platform entrypoint: Windows routes through WSL, macOS/Linux build natively.
 - Automatic WSL detection and installation.
+- Auto-detection of required Android SDK versions (`compileSdk`, `buildToolsVersion`, `ndkVersion`) from the project's `android/build.gradle`, with sensible defaults.
 - Automatic Android SDK provisioning inside WSL if it isn't already set up (cmdline-tools, licenses, platform, build-tools, NDK).
+- Support for three build types: **Debug**, **Production**, and **Signing Report**.
+- Support for two output formats: **APK** (direct sideload) and **AAB** (Play Store upload).
+- Two APK delivery options, chosen before the build starts so there's no waiting for input after a long compile:
+  - **Local network (WiFi)** — serves the APK from a temporary HTTP server on the LAN; auto-shuts down after the device downloads it. No internet required.
+  - **S3 upload** — streams the APK to S3-compatible storage and prints a scannable QR link via a Cloudflare Worker.
+- Monorepo/Turborepo support: walks the directory tree to find Expo projects, prompts if multiple are found.
 - Package manager auto-detection from lockfile (`pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`, `bun.lock`), defaulting to npm.
 - Conservative Gradle JVM/worker limits auto-injected into `gradle.properties` to avoid OOM crashes inside memory-constrained WSL VMs.
 - Persistent per-project identity via `expo-build.toml` (a UUID `app_id`, generated on first run, used to namespace S3 keys).
 - Streaming multipart S3 upload (5 MB parts, 5 concurrent) with a terminal progress bar.
-- QR code + shareable download link generation via a Cloudflare Worker, so AWS credentials never touch the client device.
+- QR code generation for both local and S3 delivery paths.
 - Build-time secrets (S3 bucket, AWS keys/region/endpoint) injected via `-ldflags` rather than hardcoded into source.
 
 ## Prerequisites
 
 - Go 1.21+ — only needed to build the CLI itself, not to use the compiled binary.
 - **Windows:** hardware/OS version capable of running WSL2. The tool will install WSL automatically if it's missing, but a reboot is required afterward.
-- **macOS/Linux:** Java and the Android SDK already configured on `PATH` — `build.bash`'s auto-provisioning step is currently WSL-specific and does not run on these platforms.
+- **macOS/Linux:** Java and the Android SDK already configured on `PATH` — `build.bash`'s auto-provisioning step runs inside WSL and is not triggered on these platforms.
 - An Expo/React Native project using pnpm, yarn, npm, or bun.
-- *(Optional, for the upload/QR step)* an S3-compatible bucket and credentials, plus a deployed Cloudflare Worker pointed at that bucket.
+- *(Optional, for the S3 upload/QR step)* an S3-compatible bucket and credentials, plus a deployed Cloudflare Worker pointed at that bucket.
 
 ## Installation
 
-Build from source, injecting your S3/AWS config at compile time:
+Build from source, optionally injecting your S3/AWS config at compile time:
 
 ```bash
 git clone 
@@ -80,35 +91,44 @@ go build -ldflags "\
   -X main.AWSAccessKey=your-access-key \
   -X main.AWSSecretKey=your-secret-key \
   -X main.AWSRegion=your-region \
-  -X main.BASE_URL=https://your-bucket.s3.your-region.amazonaws.com" \
-  -o expo-build.exe .
+  -X main.BASE_URL=https://your-worker.your-subdomain.workers.dev" \
+  -o expo-build .
 ```
 
-> On Windows, these values are currently **mandatory** — see [Known limitations](#known-limitations--roadmap). On macOS/Linux they're unused, since the upload step doesn't run on those platforms.
+> AWS credentials are only required if you intend to use the **S3 upload** delivery option. Choosing **Local network (WiFi)** delivery requires no credentials at all.
 
 ## Usage
 
-From the root of your Expo/React Native project:
+From the root of your Expo/React Native project (or monorepo root):
 
 ```bash
-expo-build.exe
+./expo-build
 ```
 
-- On first run, a `expo-build.toml` file is created in the project root with a generated `app_id` (a UUID used to namespace S3 upload keys per project).
-- **Windows:** checks for WSL → installs it if absent (you'll need to reboot once, then re-run) → translates the project and script paths into WSL paths → runs the full build inside WSL → copies the APK back to the project root → uploads it to S3 → prints a download link and a scannable QR code.
-- **macOS/Linux:** runs the build script directly against the project. Finishes once `app-debug.apk` lands in the project root — no upload step.
+You'll be prompted to:
+
+1. **What would you like to do?** — Build a new APK/AAB, or upload an existing APK.
+2. **Select the build type** — Debug, Production, or Signing Report.
+3. **Select the output format** — APK (sideload) or AAB (Play Store). *(Skipped for Signing Report.)*
+4. **How would you like to deliver the APK?** — Local network (WiFi) or S3 upload. *(APK only; asked before the build starts so no input is needed after the compile.)*
+
+On first run, a `expo-build.toml` file is created in the project root with a generated `app_id` (a UUID used to namespace S3 upload keys per project).
+
+### Uploading an existing APK
+
+Select **Upload an existing APK** at the first prompt. You'll be asked for the path to the APK, then taken straight to the delivery step — no build occurs.
 
 ## What `build.bash` actually does
 
 1. Loads a Java environment — via `sdkman` if available, otherwise falls back to `JAVA_HOME` derived from `java` on `PATH`.
-2. Provisions an Android SDK at `~/Android/Sdk` if one doesn't already exist: downloads the official Linux command-line tools, accepts licenses, and installs `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`, and `ndk;27.1.12297006`.
-3. Detects the package manager from the lockfile present in the project (pnpm → yarn → npm → bun → npm fallback).
-4. `tar`-pipes the project into `~/build` on WSL's native filesystem — excluding `node_modules`, `android/.cxx`, and `android/build` — which is the actual fix for the path-length problem (a clean copy onto ext4, not a path translation trick).
-5. Installs dependencies with the detected package manager.
-6. Runs `npx expo prebuild`.
-7. Appends Gradle memory/worker limits (`-Xmx4g`, `MaxMetaspaceSize=1g`, `workers.max=2`, caching + parallel builds enabled) to `android/gradle.properties` to avoid OOM in constrained WSL environments.
-8. Runs `./gradlew assembleDebug`.
-9. Copies the resulting `app-debug.apk` back to the original project path.
+2. Copies the project into `~/build` on WSL's native ext4 filesystem via `tar`, excluding `node_modules`, `.git`, `build`, `.cxx`, `Pods`, `.expo`, `.turbo`, `.next`, and `dist`.
+3. Runs `expo prebuild` inside the app directory.
+4. Auto-detects required SDK versions from `android/build.gradle` (`compileSdk`, `buildToolsVersion`, `ndkVersion`), falling back to `35` / `35.0.0` / `26.1.10909125` if not found.
+5. Provisions an Android SDK at `~/Android/Sdk` if one doesn't exist: downloads the official Linux command-line tools, accepts licenses, and installs the detected `platform-tools`, `platforms;android-N`, `build-tools;N`, and `ndk;N`.
+6. Detects the package manager from the lockfile at the workspace root (pnpm → yarn → npm → bun → npm fallback) and installs dependencies.
+7. Appends Gradle memory/worker limits (`-Xmx4g`, `MaxMetaspaceSize=1g`, `workers.max=2`, caching + parallel enabled, `armeabi-v7a,arm64-v8a` only) to `android/gradle.properties`.
+8. Runs the appropriate Gradle task: `assembleDebug`, `assembleRelease`, `bundleDebug`, `bundleRelease`, or `signingReport`.
+9. Copies the resulting artifact back to the original project path (or prints the signing report in-place).
 10. Cleans up `~/build`.
 
 ## Cloudflare Worker (download gateway)
@@ -117,7 +137,7 @@ The worker exists so the link handed out to a phone is a plain authenticated GET
 
 It expects a `?q=<object-key>` query parameter, signs a GET request to S3 server-side using [`aws4fetch`](https://github.com/kotx/aws4fetch), streams the object back with the original content type/length, and sets `Content-Disposition: attachment` so the APK downloads directly rather than rendering in-browser.
 
-**Required Worker environment variables / secrets** (set via `wrangler secret put` or the dashboard — separate from the CLI's build-time `-ldflags`):
+**Required Worker environment variables / secrets** (set via `wrangler secret put` or the dashboard):
 
 | Variable | Purpose |
 |---|---|
@@ -138,6 +158,7 @@ It expects a `?q=<object-key>` query parameter, signs a GET request to S3 server
 | `main.AWSAccessKey` | Access key for upload |
 | `main.AWSSecretKey` | Secret key for upload |
 | `main.AWSRegion` | Region passed to the S3 client |
+| `main.BASE_URL` | Base URL of the Cloudflare Worker (used to construct the download link) |
 
 ### `expo-build.toml` (generated per project)
 
@@ -153,9 +174,10 @@ Used purely as an S3 key prefix to namespace uploads — one project's builds wo
 ```
 .
 ├── main.go            # CLI entrypoint: OS detection, WSL orchestration,
-│                      #   path translation, S3 upload, QR generation
+│                      #   path translation, APK delivery, S3 upload, QR generation
 ├── build.bash         # embedded via go:embed — Java/Android SDK setup,
-│                      #   package manager detection, prebuild + Gradle build
+│                      #   SDK version auto-detection, package manager detection,
+│                      #   prebuild + Gradle build, artifact copy-back
 ├── worker/
 │   └── index.ts       # Cloudflare Worker: authenticated S3 download gateway
 └── expo-build.toml    # generated per project on first run
@@ -163,11 +185,10 @@ Used purely as an S3 key prefix to namespace uploads — one project's builds wo
 
 ## Known limitations / roadmap
 
-- **S3 upload is currently mandatory on Windows.** If AWS credentials weren't injected at compile time, the binary panics *after* a successful build rather than just leaving the APK in place — there's no "build-only, skip upload" path on Windows yet.
-- **Only `assembleDebug` is wired up** — no release/signed build variant yet.
-- **Android SDK provisioning versions are hardcoded** (`android-36`, `build-tools;36.0.0`, `ndk;27.1.12297006`) rather than configurable per project.
 - **No WSL distro selection** — assumes the default WSL distro.
 - **Reboot-after-WSL-install is manual** — the tool exits and asks the user to reboot and re-run rather than handling resumption automatically.
+- **macOS/Linux SDK provisioning** — `build.bash` auto-provisions the Android SDK inside WSL but does not run this step on macOS/Linux, where the SDK must already be configured.
+- **Local WiFi delivery is LAN-only** — both the build machine and the device must be on the same network. This is by design (no credentials needed, instant transfer), but it won't work across different networks.
 
 ## License
 
