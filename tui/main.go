@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	gobanner "github.com/Kishan-Agarwal-28/go-banner"
+	zone "github.com/lrstanley/bubblezone/v2"
 	qrterminal "github.com/mdp/qrterminal/v3"
 
 	"github.com/kishan-agarwal-28/expo-tui/db"
@@ -843,23 +844,18 @@ func (m model) launchBuild(_ string, cmds []tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleMouse(msg tea.MouseClickMsg) {
-	startX := 3
-	startY := 2 + m.headerHeight
-	sidebarWidth := 22
-	if msg.X >= startX && msg.X <= startX+(sidebarWidth-1) {
+	if zone.Get("sidebar").InBounds(msg) {
 		m.focus = FocusSidebar
-		clickY := msg.Y - startY
-		switch {
-		case clickY >= 0 && clickY <= 1:
+		if zone.Get("tab_build").InBounds(msg) {
 			m.tabActive = buildTab
-		case clickY >= 2 && clickY <= 3:
+		} else if zone.Get("tab_history").InBounds(msg) {
 			m.tabActive = historyTab
-		case clickY >= 4 && clickY <= 5:
+		} else if zone.Get("tab_share").InBounds(msg) {
 			m.tabActive = shareTab
-		case clickY >= 6 && clickY <= 7:
+		} else if zone.Get("tab_settings").InBounds(msg) {
 			m.tabActive = settingsTab
 		}
-	} else if msg.X > startX+(sidebarWidth-1) {
+	} else if zone.Get("content").InBounds(msg) {
 		m.focus = FocusContent
 	}
 }
@@ -902,9 +898,9 @@ func (m model) View() tea.View {
 	for _, t := range []Tab{buildTab, historyTab, shareTab, settingsTab} {
 		lbl := icons[t] + " " + t.String()
 		if t == m.tabActive {
-			renderedTabs = append(renderedTabs, activeSt.Render(lbl))
+			renderedTabs = append(renderedTabs, zone.Mark("tab_"+strings.ToLower(t.String()), activeSt.Render(lbl)))
 		} else {
-			renderedTabs = append(renderedTabs, inactiveSt.Render(lbl))
+			renderedTabs = append(renderedTabs, zone.Mark("tab_"+strings.ToLower(t.String()), inactiveSt.Render(lbl)))
 		}
 	}
 	tabMenu := lipgloss.JoinVertical(lipgloss.Left, renderedTabs...)
@@ -922,6 +918,7 @@ func (m model) View() tea.View {
 		Border(lipgloss.NormalBorder(), false, true, false, false).
 		BorderForeground(colorBorder).
 		Render(sidebarBody)
+	sidebar = zone.Mark("sidebar", sidebar)
 
 	var content string
 	switch m.tabActive {
@@ -938,6 +935,7 @@ func (m model) View() tea.View {
 	contentBox := lipgloss.NewStyle().
 		Width(contentWidth).Height(innerH).
 		PaddingLeft(1).PaddingTop(1).Render(content)
+	contentBox = zone.Mark("content", contentBox)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, contentBox)
 	layout := lipgloss.JoinVertical(lipgloss.Left, header, body)
@@ -947,7 +945,7 @@ func (m model) View() tea.View {
 		BorderForeground(colorPrimary).
 		Height(m.height).Width(m.width).Padding(1, 2)
 
-	v.SetContent(outer.Render(layout))
+	v.SetContent(zone.Scan(outer.Render(layout)))
 	return v
 }
 
@@ -1612,6 +1610,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer database.Close()
+
+	zone.NewGlobal()
+	defer zone.Close()
 
 	appID := resolveAppID(projectDir())
 
